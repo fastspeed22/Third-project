@@ -1,60 +1,70 @@
+import re
 import string
 
-#Fix loops
 
 def check_password():
     password = input("Enter a password to check: ")
-    length_ok = len(password) >= 8
-    has_upper = any(c.isupper() for c in password)
-    has_digit = any(c.isdigit() for c in password)
-    has_symbol = any(c in string.punctuation for c in password)
- 
-    if length_ok and has_upper and has_digit and has_symbol:
+
+    missing = []
+    if len(password) < 8:
+        missing.append("at least 8 characters")
+    if not any(c.isupper() for c in password):
+        missing.append("an uppercase letter")
+    if not any(c.isdigit() for c in password):
+        missing.append("a number")
+    if not any(c in string.punctuation for c in password):
+        missing.append("a special character")
+
+    if not missing:
         print("Strong password!")
-    elif length_ok and (has_symbol or has_digit or has_upper):
-        missing = []
-
-        if not has_upper:
-            missing.append("an uppercase letter")
-        if not has_digit:
-            missing.append("an number")
-        if not has_symbol:
-            missing.append("a special character")
-        print("Almost there! Add: "+", ".join(missing))
-    
+    elif len(missing) >= 3:
+        print("Weak password. You need: " + ", ".join(missing))
     else:
-        print("Son you're really using THAT password. Worst passwords of all time. You need ATLEAST 8 characters,an uppercase letter, number, and special character")   
+        print("Almost there! Add: " + ", ".join(missing))
 
 
-def password_checker():
-    
+PHISHING_WORDS = ["urgent", "immediately", "act now", "final notice", "last chance", "expires today", "within 24 hours", "respond", "limited time", "suspended", "locked", "unusual activity", "unauthorized", "security", "alert", "verify your account", "confirm your identity", "account closed", "deactivated", "ssn" "password", "pin", "social security", "bank", "payment", "credit card", "cvv", "verification code", "one-time code", "login", "username", "wire transfer", "gift card", "bitcoin", "crypto", "invoice", "refund", "overdue", "billing", "direct deposit", "you've won", "lottery", "prize", "congratulations", "inheritance", "free", "claim your reward", "selected", "dear customer", "dear user", "valued customer", "dear member", "click here", "click the link", "open attachment", "download",    ]
+
+
+
+def check_phishing():
     while True:
-        print("\n=== This is password strength checker ===")
-        ans = input("Would you like to check your password?(yes/no)").lower()
-        if ans == "yes":
-            check_password()
-        elif ans == "no":
+        message = input("\nEnter a message to analyze (or 'back' to return to the menu): ").lower()
+
+        if message.strip() == "back":
             break
+
+        # \b makes sure we match whole words ("pin" won't match "shipping")
+        found = [w for w in PHISHING_WORDS if re.search(rf"\b{w}\b", message)]
+
+        if found:
+            print("Warning: possible phishing. Suspicious words found: " + ", ".join(found))
         else:
-            print("Enter required input")
-            password_checker
-                
-        
-        
+            print("No red flags found. Still be careful of suspicious links and unknown senders.")
+
 
 def menu():
     while True:
-        print("\n=== Welcome to cyber build ===")
-        ans = input("\nWould you like to 1) password checker 2) Phishing dectector 3) File integrity checker 4) log analyzer 5) quit: ").lower()
-        if ans in ("1", "password checker", "password"):
-            password_checker()
-        elif ans in ("2", "phishing", "phishing dectector" ):
-            print("not finished")
-        elif ans in ("3"):
-            print("not finished")
-        elif ans in ("5", "quit"):
+        print("\n=== Welcome to Cyber Build ===")
+        print("1. Password Strength Checker")
+        print("2. Phishing Detector")
+        print("3. File Integrity Checker")
+        print("4. Log Analyzer")
+        print("5. Quit")
+
+        choice = input("\nSelect an option: ").strip().lower()
+
+        if choice in ("1", "password"):
+            check_password()
+        elif choice in ("2", "phishing"):
+            check_phishing()
+        elif choice in ("3", "4"):
+            print("Not finished yet.")
+        elif choice in ("5", "quit"):
             break
         else:
-            print("Enter one of the above options")
+            print("Enter one of the above options.")
 
-menu()
+
+if __name__ == "__main__":
+    menu()
