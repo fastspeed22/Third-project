@@ -1,3 +1,6 @@
+import base64
+import getpass
+from collections import Counter
 import hashlib
 import json
 import os
@@ -7,8 +10,8 @@ import string
 
 def check_password():
     while True:
-        print("\n--- Pasword Checker ---")
-        print("1. Enter a pasword to check")
+        print("\n--- Password Checker ---")
+        print("1. Enter a password to check")
         print("2. Go back to the menu")
         choice = input("Select an option: ")
 
@@ -16,7 +19,7 @@ def check_password():
         if choice in ("2", "back"):
             break
         elif choice == "1":
-            password = input("Enter a pasword to check: ")
+            password = input("Enter a password to check: ")
 
             missing = []
             if len(password) < 8:
@@ -48,12 +51,10 @@ def check_phishing():
 
         if choice in ("2", "back"):
             break
-
-        # \b makes sure we match whole words ("pin" won't match "shipping")
-        
         elif choice == "1":
-            message = input("Enter a possible Phishing: ")
+            message = input("Enter a possible Phishing: ").lower()
             
+            # \b matches whole words only ("pin" won't match "shipping")
             found = [w for w in PHISHING_WORDS if re.search(rf"\b{re.escape(w)}\b", message)]
             if found:
                 print("Warning: possible phishing. Suspicious words found: " + ", ".join(found))
@@ -102,7 +103,7 @@ def file_integrity_checker():
 
         path = input("Enter the file path: ").strip().strip('"')
         if not os.path.isfile(path):
-            print("File not found.")
+            print("\nFile not found.")
             continue
 
         key = os.path.abspath(path)
@@ -119,14 +120,139 @@ def file_integrity_checker():
             save_hashes(hashes)
             print(f"Saved hash: {current}")
         elif key not in hashes:
-            print("No saved hash for this file yet. Use option 1 first.")
+            print("\nNo saved hash for this file yet. Use option 1 first.")
         elif hashes[key] == current:
-            print("OK: file is unchanged.")
+            print("\nOK: file is unchanged.")
         else:
-            print("WARNING: file has CHANGED since its hash was saved!")
+            print("\nWARNING: file has CHANGED since its hash was saved!")
+
+LEVEL_PATTERN = re.compile(r"\b(ERROR|WARNING|INFO)\b", re.IGNORECASE)
+IP_PATTERN = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+BRUTE_FORCE_THRESHOLD = 5  # number of failed attempts to consider an IP suspicious
+
 
 def log_analyzer():
-    print("not finished yet")
+    while True:
+        print("\n--- Log Analyzer ---")
+        print("1. enter a log file for analysis")
+        print("2. go back to the menu")
+        choice = input("Select an option: ").strip()
+
+        if choice in ("2", "back"):
+            break
+        elif choice == "1":
+            path = input("Enter the log file path: ").strip().strip('"')
+            if not os.path.isfile(path):
+                print("\nFile not found.")
+                continue
+
+            levels = Counter()
+            failed_ips = Counter()
+            total = 0
+
+            try:
+                with open(path, errors="ignore") as f:
+                    for line in f:
+                        total += 1
+
+                        level = LEVEL_PATTERN.search(line)
+                        if level:
+                            levels[level.group(1).upper()] += 1
+
+
+                        if "failed" in line.lower():
+                            for ip in IP_PATTERN.findall(line):
+                                failed_ips[ip] += 1
+            except OSError as e:
+                print(f"\nCould not read file: {e}")
+                continue
+            print(f"\n--- Log Analysis Report: {total} lines ---")
+            for name in ("ERROR", "WARNING", "INFO"):
+                print(f"{name}: {levels[name]}")
+
+            print(f"\nFailed Attempts: {sum(failed_ips.values())}")
+            for ip, count in failed_ips.most_common(3):
+                print(f"  {ip}: {count}")
+
+            suspicious = [ip for ip, count in failed_ips.items() if count >= BRUTE_FORCE_THRESHOLD]
+            
+            if suspicious:
+                print("\nWARNING: possible brute-force attack detected from: "+", ".join(suspicious))
+            else:
+                print("\nNo brute-force attack patterns found.")
+
+SALT_SIZE = 16
+KDF_ITERATIONS = 600_000
+
+def derive_key(password, salt):
+    kdf = PBKDF2HMAC(algorithm=crypto_hashes.SHA256(), length=32, salt=salt, iterations=KDF_ITERATIONS)
+    return base64.urlsafe_b64encode(kdf.derive(password.encode()))
+
+def encrypt_file(path, password):
+    salt = os.urandom(SALT_SIZE)
+    with open(path, "rb") as f:
+        data = f.read()
+
+    token = Fernet(derive_key(password, salt)).encrypt(data)
+
+    out_path = path + ".enc"
+    with open(out_path, "wb") as f:
+        f.write(salt + token)
+    return out_path
+
+def decrypt_file(path, password):
+    with open(path, "rb") as f:
+        blob = f.read()
+
+    salt, token = blob[:SALT_SIZE]
+    data = Fernet(derive_key(password, salt)).decrypt(token)
+
+    out_path = path[:-4] if path.endswith(".enc") else path + ".dec"
+    if os.path.exists(out_path):
+        base, ext = os.path.splitext(out_path)
+        out_path = f"{base}_decrypted{ext}"
+    with open(out_path, "wb") as f:
+        f.write(data)
+    return out_path
+
+
+def encryption_tool():
+    while True:
+        print("\n--- Encryption Tool ---")
+        print("1. Encrypt a file")
+        print("2. Decrypt a file")
+        print("3. Go back to the menu")
+        choice = input("Which option do you choose? ").strip()
+        if choice in ("3", "back"):
+            return
+        if choice not in ("1", "2"):
+            print("Choose one of the above options.")
+            continue
+
+        path = input("Enter a file to encrypt: ").strip().strip('"')
+        if not os.path.isfile(path):
+            print("\nFile not found.")
+            continue
+        password = getpass.getpass("Enter a password: ")
+        if not password:
+            print("Password cannot be empty.")
+            continue
+
+        try:
+            if choice == "1":
+                if password != getpass.getpass("Confirm password: "):
+                    print("Passwords do not match.")
+                    continue
+                if os.path.exists(path + ".enc") and input("Encrypted copy already exists. Overwrite? (y/n): ").strp().lower() != "yes":
+                    continue
+                print(f"Encrypted! Saved as: {encrypted_file(path, password)}")
+                print("Your original file was NOT deleted. Remember your password; it can't be recovered")
+            else:
+                print(f"Decryped! Saved as: [encrypt_file(path, password)]")
+        except InvalidToken: 
+            print("Decryption failed: wrong password, or the file is corrupted or not encrypted by this tool.")
+        except OSError as e:
+            print(f"Could not read or write this file: {e}")
 def menu():
     while True:
         print("\n=== Welcome to Cyber Build ===")
@@ -134,7 +260,8 @@ def menu():
         print("2. Phishing Detector")
         print("3. File Integrity Checker")
         print("4. Log Analyzer")
-        print("5. Quit")
+        print("5. Encryption/Decryption tool")
+        print("6. Quit")
 
         choice = input("\nSelect an option: ").strip().lower()
 
@@ -146,7 +273,9 @@ def menu():
             file_integrity_checker()
         elif choice in ("4", "log analyzer"):
             log_analyzer()
-        elif choice in ("5", "quit"):
+        elif choice in ("5", "encryption/decryption tool"):
+            encryption_tool()
+        elif choice in ("6", "quit"):
             break
         else:
             print("Enter one of the above options.")
