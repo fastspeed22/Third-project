@@ -1,15 +1,12 @@
-import base64
 from collections import Counter
 import getpass
 import hashlib
+import hmac
 import json
 import os
 import re
 import string
-
-from cryptography.fernet import Fernet, InvalidToken
-from cryptography.hazmat.primitives import hashes as crypto_hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+import sys
 
 
 def check_password():
@@ -62,13 +59,19 @@ def check_phishing():
             # \b matches whole words only ("pin" won't match "shipping")
             found = [w for w in PHISHING_WORDS if re.search(rf"\b{re.escape(w)}\b", message)]
             if found:
-                print("\nWarning: possible phishing. Suspicious words found: " + ", ".join(found))
+                print("Warning: possible phishing. Suspicious words found: " + ", ".join(found))
             else:
-                print("\nNo red flags found. Still be careful of suspicious links and unknown senders.")
+                print("No red flags found. Still be careful of suspicious links and unknown senders.")
         else:
-            print("\nEnter one of the above options.")
+            print("Enter one of the above options.")
 
-HASH_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hashes.json")  # saved next to this script
+# Save next to the program. Inside a PyInstaller .exe, __file__ points at a temporary
+# folder that is deleted on exit, so use the .exe's own folder instead.
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+HASH_FILE = os.path.join(BASE_DIR, "hashes.json")
 
 
 def hash_file(path):
@@ -86,7 +89,7 @@ def load_hashes():
             with open(HASH_FILE) as f:
                 return json.load(f)
         except (OSError, json.JSONDecodeError):
-            print("\nWarning: hashes.json is unreadable, starting with no saved hashes.")
+            print("Warning: hashes.json is unreadable, starting with no saved hashes.")
     return {}
 
 
@@ -118,7 +121,7 @@ def file_integrity_checker():
         try:
             current = hash_file(path)
         except OSError as e:
-            print(f"\nCould not read file: {e}")
+            print(f"Could not read file: {e}")
             continue
 
         hashes = load_hashes()
@@ -130,9 +133,9 @@ def file_integrity_checker():
         elif key not in hashes:
             print("No saved hash for this file yet. Use option 1 first.")
         elif hashes[key] == current:
-            print("\nOK: file is unchanged.")
+            print("OK: file is unchanged.")
         else:
-            print("\nWARNING: file has CHANGED since its hash was saved!")
+            print("WARNING: file has CHANGED since its hash was saved!")
 
 LEVEL_PATTERN = re.compile(r"\b(ERROR|WARNING|INFO)\b", re.IGNORECASE)
 IP_PATTERN = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
@@ -192,38 +195,86 @@ def log_analyzer():
             print("Enter one of the above options.")
 
 
+# Encryption built only from Python's standard library (no extra packages to install,
+# so it works inside a PyInstaller .exe). The design:
+#   password --PBKDF2-HMAC-SHA256--> two keys (one to encrypt, one to authenticate)
+#   encrypt: XOR the file with a keystream made from HMAC-SHA256(key, nonce + counter)
+#   authenticate: HMAC-SHA256 tag over everything (encrypt-then-MAC), checked BEFORE decrypting
+# File layout: MAGIC | salt | nonce | ciphertext | tag
+MAGIC = b"CBE1"
 SALT_SIZE = 16
+NONCE_SIZE = 16
+TAG_SIZE = 32
 KDF_ITERATIONS = 600_000  # more iterations = slower for attackers guessing passwords
+CHUNK_SIZE = 1 << 20      # process 1 MiB at a time (must be a multiple of 32)
 
 
-def derive_key(password, salt):
-    """Turn a password + random salt into a 32-byte key Fernet can use."""
-    kdf = PBKDF2HMAC(algorithm=crypto_hashes.SHA256(), length=32, salt=salt, iterations=KDF_ITERATIONS)
-    return base64.urlsafe_b64encode(kdf.derive(password.encode()))
+class DecryptionError(Exception):
+    """Wrong password, a damaged file, or a file not made by this tool."""
+
+
+def derive_keys(password, salt):
+    """Turn a password + random salt into two independent 32-byte keys."""
+    material = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, KDF_ITERATIONS, dklen=64)
+    return material[:32], material[32:]
+
+
+def apply_keystream(data, enc_key, nonce):
+    """XOR data with the keystream. The same call encrypts and decrypts."""
+    base = hmac.new(enc_key, nonce, hashlib.sha256)
+    out = bytearray()
+    for offset in range(0, len(data), CHUNK_SIZE):
+        chunk = data[offset:offset + CHUNK_SIZE]
+        first_block = offset // 32
+        blocks = []
+        for i in range((len(chunk) + 31) // 32):
+            block = base.copy()
+            block.update((first_block + i).to_bytes(8, "big"))
+            blocks.append(block.digest())
+        stream = b"".join(blocks)[:len(chunk)]
+        out += (int.from_bytes(chunk, "big") ^ int.from_bytes(stream, "big")).to_bytes(len(chunk), "big")
+    return bytes(out)
 
 
 def encrypt_file(path, password):
     """Write an encrypted copy of the file (path + '.enc') and return its name."""
-    salt = os.urandom(SALT_SIZE)
     with open(path, "rb") as f:
         data = f.read()
 
-    token = Fernet(derive_key(password, salt)).encrypt(data)
+    salt = os.urandom(SALT_SIZE)
+    nonce = os.urandom(NONCE_SIZE)
+    enc_key, mac_key = derive_keys(password, salt)
+
+    body = MAGIC + salt + nonce + apply_keystream(data, enc_key, nonce)
+    tag = hmac.new(mac_key, body, hashlib.sha256).digest()
 
     out_path = path + ".enc"
     with open(out_path, "wb") as f:
-        f.write(salt + token)  # salt isn't secret, but we need it to decrypt later
+        f.write(body + tag)
     return out_path
 
 
 def decrypt_file(path, password):
     """Write a decrypted copy of an .enc file and return its name.
-    Raises InvalidToken if the password is wrong or the file was changed."""
+    Raises DecryptionError if the password is wrong or the file was changed."""
     with open(path, "rb") as f:
         blob = f.read()
 
-    salt, token = blob[:SALT_SIZE], blob[SALT_SIZE:]
-    data = Fernet(derive_key(password, salt)).decrypt(token)
+    header_size = len(MAGIC) + SALT_SIZE + NONCE_SIZE
+    if len(blob) < header_size + TAG_SIZE or not blob.startswith(MAGIC):
+        raise DecryptionError("not an encrypted file made by this tool")
+
+    salt = blob[len(MAGIC):len(MAGIC) + SALT_SIZE]
+    nonce = blob[len(MAGIC) + SALT_SIZE:header_size]
+    body, tag = blob[:-TAG_SIZE], blob[-TAG_SIZE:]
+    ciphertext = blob[header_size:-TAG_SIZE]
+
+    enc_key, mac_key = derive_keys(password, salt)
+    expected = hmac.new(mac_key, body, hashlib.sha256).digest()
+    if not hmac.compare_digest(tag, expected):  # checked before any decrypting happens
+        raise DecryptionError("wrong password or the file was modified")
+
+    data = apply_keystream(ciphertext, enc_key, nonce)
 
     out_path = path[:-4] if path.endswith(".enc") else path + ".dec"
     if os.path.exists(out_path):  # never overwrite an existing file
@@ -232,7 +283,6 @@ def decrypt_file(path, password):
     with open(out_path, "wb") as f:
         f.write(data)
     return out_path
-
 
 
 def encryption_tool():
@@ -262,16 +312,16 @@ def encryption_tool():
         try:
             if choice == "1":
                 if password != getpass.getpass("Confirm password: "):
-                    print("\nPasswords don't match.")
+                    print("Passwords don't match.")
                     continue
-                if os.path.exists(path + ".enc") and input("\nEncrypted copy already exists. Overwrite? (yes/no): ").strip().lower() != "yes":
+                if os.path.exists(path + ".enc") and input("Encrypted copy already exists. Overwrite? (yes/no): ").strip().lower() != "yes":
                     continue
-                print(f"\nEncrypted! Saved as: {encrypt_file(path, password)}")
+                print(f"Encrypted! Saved as: {encrypt_file(path, password)}")
                 print("Your original file was NOT deleted. Remember your password; it can't be recovered.")
             else:
                 print(f"Decrypted! Saved as: {decrypt_file(path, password)}")
-        except InvalidToken:
-            print("Decryption failed: wrong password, or the file is corrupted or not encrypted by this tool.")
+        except DecryptionError as e:
+            print(f"Decryption failed: {e}.")
         except OSError as e:
             print(f"Could not read or write file: {e}")
 
