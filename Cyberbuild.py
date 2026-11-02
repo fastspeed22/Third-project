@@ -1,11 +1,15 @@
 import base64
-import getpass
 from collections import Counter
+import getpass
 import hashlib
 import json
 import os
 import re
 import string
+
+from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives import hashes as crypto_hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 
 def check_password():
@@ -13,8 +17,7 @@ def check_password():
         print("\n--- Password Checker ---")
         print("1. Enter a password to check")
         print("2. Go back to the menu")
-        choice = input("Select an option: ")
-
+        choice = input("Select an option: ").strip().lower()
 
         if choice in ("2", "back"):
             break
@@ -37,6 +40,8 @@ def check_password():
                 print("\nWeak password. You need: " + ", ".join(missing))
             else:
                 print("\nAlmost there! Add: " + ", ".join(missing))
+        else:
+            print("Enter one of the above options.")
 
     
 PHISHING_WORDS = ["urgent", "immediately", "act now", "final notice", "last chance", "expires today", "within 24 hours", "respond", "limited time", "suspended", "locked", "unusual activity", "unauthorized", "security", "alert", "verify your account", "confirm your identity", "account closed", "deactivated", "ssn", "password", "pin", "social security", "bank", "payment", "credit card", "cvv", "verification code", "one-time code", "login", "username", "wire transfer", "gift card", "bitcoin", "crypto", "invoice", "refund", "overdue", "billing", "direct deposit", "you've won", "lottery", "prize", "congratulations", "inheritance", "free", "claim your reward", "selected", "dear customer", "dear user", "valued customer", "dear member", "click here", "click the link", "open attachment", "download", "update your information", "log in"]
@@ -57,13 +62,13 @@ def check_phishing():
             # \b matches whole words only ("pin" won't match "shipping")
             found = [w for w in PHISHING_WORDS if re.search(rf"\b{re.escape(w)}\b", message)]
             if found:
-                print("Warning: possible phishing. Suspicious words found: " + ", ".join(found))
+                print("\nWarning: possible phishing. Suspicious words found: " + ", ".join(found))
             else:
-                print("No red flags found. Still be careful of suspicious links and unknown senders.")
+                print("\nNo red flags found. Still be careful of suspicious links and unknown senders.")
         else:
-            print("Enter one of the above options.")
+            print("\nEnter one of the above options.")
 
-HASH_FILE = "hashes.json"  # where saved hashes are stored
+HASH_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hashes.json")  # saved next to this script
 
 
 def hash_file(path):
@@ -77,8 +82,11 @@ def hash_file(path):
 
 def load_hashes():
     if os.path.exists(HASH_FILE):
-        with open(HASH_FILE) as f:
-            return json.load(f)
+        try:
+            with open(HASH_FILE) as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            print("\nWarning: hashes.json is unreadable, starting with no saved hashes.")
     return {}
 
 
@@ -93,7 +101,7 @@ def file_integrity_checker():
         print("1. Save a file's hash")
         print("2. Check a file against its saved hash")
         print("3. Back")
-        choice = input("Select an option: ").strip()
+        choice = input("Select an option: ").strip().lower()
 
         if choice in ("3", "back"):
             break
@@ -103,14 +111,14 @@ def file_integrity_checker():
 
         path = input("Enter the file path: ").strip().strip('"')
         if not os.path.isfile(path):
-            print("\nFile not found.")
+            print("File not found.")
             continue
 
         key = os.path.abspath(path)
         try:
             current = hash_file(path)
         except OSError as e:
-            print(f"Could not read file: {e}")
+            print(f"\nCould not read file: {e}")
             continue
 
         hashes = load_hashes()
@@ -120,7 +128,7 @@ def file_integrity_checker():
             save_hashes(hashes)
             print(f"Saved hash: {current}")
         elif key not in hashes:
-            print("\nNo saved hash for this file yet. Use option 1 first.")
+            print("No saved hash for this file yet. Use option 1 first.")
         elif hashes[key] == current:
             print("\nOK: file is unchanged.")
         else:
@@ -136,7 +144,7 @@ def log_analyzer():
         print("\n--- Log Analyzer ---")
         print("1. enter a log file for analysis")
         print("2. go back to the menu")
-        choice = input("Select an option: ").strip()
+        choice = input("Select an option: ").strip().lower()
 
         if choice in ("2", "back"):
             break
@@ -180,15 +188,22 @@ def log_analyzer():
                 print("\nWARNING: possible brute-force attack detected from: "+", ".join(suspicious))
             else:
                 print("\nNo brute-force attack patterns found.")
+        else:
+            print("Enter one of the above options.")
+
 
 SALT_SIZE = 16
-KDF_ITERATIONS = 600_000
+KDF_ITERATIONS = 600_000  # more iterations = slower for attackers guessing passwords
+
 
 def derive_key(password, salt):
+    """Turn a password + random salt into a 32-byte key Fernet can use."""
     kdf = PBKDF2HMAC(algorithm=crypto_hashes.SHA256(), length=32, salt=salt, iterations=KDF_ITERATIONS)
     return base64.urlsafe_b64encode(kdf.derive(password.encode()))
 
+
 def encrypt_file(path, password):
+    """Write an encrypted copy of the file (path + '.enc') and return its name."""
     salt = os.urandom(SALT_SIZE)
     with open(path, "rb") as f:
         data = f.read()
@@ -197,23 +212,27 @@ def encrypt_file(path, password):
 
     out_path = path + ".enc"
     with open(out_path, "wb") as f:
-        f.write(salt + token)
+        f.write(salt + token)  # salt isn't secret, but we need it to decrypt later
     return out_path
 
+
 def decrypt_file(path, password):
+    """Write a decrypted copy of an .enc file and return its name.
+    Raises InvalidToken if the password is wrong or the file was changed."""
     with open(path, "rb") as f:
         blob = f.read()
 
-    salt, token = blob[:SALT_SIZE]
+    salt, token = blob[:SALT_SIZE], blob[SALT_SIZE:]
     data = Fernet(derive_key(password, salt)).decrypt(token)
 
     out_path = path[:-4] if path.endswith(".enc") else path + ".dec"
-    if os.path.exists(out_path):
+    if os.path.exists(out_path):  # never overwrite an existing file
         base, ext = os.path.splitext(out_path)
         out_path = f"{base}_decrypted{ext}"
     with open(out_path, "wb") as f:
         f.write(data)
     return out_path
+
 
 
 def encryption_tool():
@@ -222,37 +241,41 @@ def encryption_tool():
         print("1. Encrypt a file")
         print("2. Decrypt a file")
         print("3. Go back to the menu")
-        choice = input("Which option do you choose? ").strip()
+        choice = input("Select an option: ").strip().lower()
+
         if choice in ("3", "back"):
-            return
+            break
         if choice not in ("1", "2"):
-            print("Choose one of the above options.")
+            print("Enter one of the above options.")
             continue
 
-        path = input("Enter a file to encrypt: ").strip().strip('"')
+        path = input("Enter the file path: ").strip().strip('"')
         if not os.path.isfile(path):
-            print("\nFile not found.")
+            print("File not found.")
             continue
-        password = getpass.getpass("Enter a password: ")
+
+        password = getpass.getpass("Enter password: ")
         if not password:
-            print("Password cannot be empty.")
+            print("Password can't be empty.")
             continue
 
         try:
             if choice == "1":
                 if password != getpass.getpass("Confirm password: "):
-                    print("Passwords do not match.")
+                    print("\nPasswords don't match.")
                     continue
-                if os.path.exists(path + ".enc") and input("Encrypted copy already exists. Overwrite? (y/n): ").strp().lower() != "yes":
+                if os.path.exists(path + ".enc") and input("\nEncrypted copy already exists. Overwrite? (yes/no): ").strip().lower() != "yes":
                     continue
-                print(f"Encrypted! Saved as: {encrypted_file(path, password)}")
-                print("Your original file was NOT deleted. Remember your password; it can't be recovered")
+                print(f"\nEncrypted! Saved as: {encrypt_file(path, password)}")
+                print("Your original file was NOT deleted. Remember your password; it can't be recovered.")
             else:
-                print(f"Decryped! Saved as: [encrypt_file(path, password)]")
-        except InvalidToken: 
+                print(f"Decrypted! Saved as: {decrypt_file(path, password)}")
+        except InvalidToken:
             print("Decryption failed: wrong password, or the file is corrupted or not encrypted by this tool.")
         except OSError as e:
-            print(f"Could not read or write this file: {e}")
+            print(f"Could not read or write file: {e}")
+
+
 def menu():
     while True:
         print("\n=== Welcome to Cyber Build ===")
@@ -260,7 +283,7 @@ def menu():
         print("2. Phishing Detector")
         print("3. File Integrity Checker")
         print("4. Log Analyzer")
-        print("5. Encryption/Decryption tool")
+        print("5. Encryption Tool")
         print("6. Quit")
 
         choice = input("\nSelect an option: ").strip().lower()
@@ -273,7 +296,7 @@ def menu():
             file_integrity_checker()
         elif choice in ("4", "log analyzer"):
             log_analyzer()
-        elif choice in ("5", "encryption/decryption tool"):
+        elif choice in ("5", "encryption tool", "encryption"):
             encryption_tool()
         elif choice in ("6", "quit"):
             break
